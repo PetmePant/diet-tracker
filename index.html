@@ -774,8 +774,12 @@ function renderDaySelector() {
   }).join('');
 }
 
+function parseLocalDate(iso) {
+  const [y,m,d] = iso.split('-').map(Number);
+  return new Date(y, m-1, d);
+}
 function selectDate(iso) {
-  currentDate = new Date(iso); currentDate.setHours(0,0,0,0);
+  currentDate = parseLocalDate(iso);
   renderDaySelector(); renderMeals();
 }
 
@@ -1023,7 +1027,7 @@ function renderWeekly() {
 }
 
 function jumpToDate(iso) {
-  currentDate = new Date(iso); currentDate.setHours(0,0,0,0);
+  currentDate = parseLocalDate(iso);
   switchTab('today');
 }
 
