@@ -7,6 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root {
@@ -37,14 +38,20 @@
   header h1 { font-family: 'DM Serif Display', serif; font-size: 20px; }
   header span { font-size: 12px; color: var(--muted); display: block; }
   .date-badge { margin-left: auto; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 7px 14px; font-size: 12px; color: var(--muted); text-align:right; }
-  .sync-badge { display:flex; align-items:center; gap:6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 6px 12px; font-size: 11px; color: var(--muted); cursor:pointer; transition: border-color .2s; }
-  .sync-badge:hover { border-color: var(--accent); }
+  .auth-btn { display:flex; align-items:center; gap:8px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 6px 13px; font-size: 12px; font-family:'DM Sans',sans-serif; color: var(--muted); cursor:pointer; transition: border-color .2s, color .2s; white-space:nowrap; }
+  .auth-btn:hover { border-color: var(--accent); color: var(--text); }
+  .auth-btn img { width:20px; height:20px; border-radius:50%; }
+  .auth-btn.owner { color: var(--accent); border-color: var(--accent); }
   .sync-dot { width:7px; height:7px; border-radius:50%; background:#94a3b8; flex-shrink:0; }
   .sync-dot.synced  { background: var(--accent); }
   .sync-dot.syncing { background: #f59e0b; animation: pulse 1s infinite; }
   .sync-dot.error   { background: var(--danger); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #syncToast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1e293b; color:#fff; padding:10px 20px; border-radius:10px; font-size:13px; z-index:9999; opacity:0; transition:opacity .3s; pointer-events:none; }
+  body.readonly .meal-check, body.readonly .swap-btn, body.readonly .shop-check,
+  body.readonly .rem-toggle, body.readonly .clear-meal-btn { opacity:0.4; pointer-events:none; cursor:not-allowed; }
+  .readonly-banner { display:none; background:#f0f9ff; border-bottom:1px solid #bae6fd; padding:8px 24px; font-size:12px; color:#0369a1; text-align:center; }
+  body.readonly .readonly-banner { display:block; }
 
   nav { display: flex; gap: 4px; padding: 14px 24px 0; border-bottom: 1px solid var(--border); overflow-x: auto; background: #ffffff; }
   nav button { background: none; border: none; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; padding: 9px 16px; cursor: pointer; border-radius: 10px 10px 0 0; transition: all .2s; white-space: nowrap; }
@@ -215,12 +222,12 @@
     <h1>Παντελής – Διατροφή</h1>
     <span id="headerDate">Φόρτωση...</span>
   </div>
-  <div class="sync-badge" onclick="copyUid()" title="Tap to copy your Sync ID">
-    <div class="sync-dot" id="syncDot"></div>
-    <span id="syncLabel">Sync</span>
-  </div>
+  <button class="auth-btn" id="authBtn" onclick="handleAuthClick()">
+    <span id="authBtnLabel">Σύνδεση</span>
+  </button>
   <div class="date-badge" id="headerDay">—</div>
 </header>
+<div class="readonly-banner">👁 Προβολή μόνο — συνδεθείτε για επεξεργασία</div>
 <div id="syncToast"></div>
 
 <nav>
@@ -630,86 +637,106 @@ const firebaseConfig = {
   appId: "1:343365872063:web:109094a1799e8c2daf190a"
 };
 firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
+const db   = firebase.firestore();
+const auth = firebase.auth();
 
-// ── User ID — from URL param or localStorage ─────────────────────
-(function() {
-  const params = new URLSearchParams(window.location.search);
-  const urlUid = params.get('uid');
-  if (urlUid) {
-    localStorage.setItem('diet_uid', urlUid);
-    // Clean URL without reload
-    const clean = window.location.pathname;
-    window.history.replaceState({}, '', clean);
-  }
-  if (!localStorage.getItem('diet_uid')) {
-    localStorage.setItem('diet_uid', 'u_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36));
-  }
-})();
-const USER_UID = localStorage.getItem('diet_uid');
+// ── Owner — only this Google account can write ───────────────────
+const OWNER_EMAIL = 'petmezas.pant@gmail.com';
+const DATA_DOC    = 'owner'; // single fixed Firestore document
 
-function setSyncStatus(state) {
-  const dot = document.getElementById('syncDot');
-  const lbl = document.getElementById('syncLabel');
-  if (!dot) return;
-  dot.className = 'sync-dot ' + state;
-  lbl.textContent = state === 'synced' ? 'Synced' : state === 'syncing' ? 'Syncing…' : state === 'error' ? 'Offline' : 'Sync';
+let currentUser = null;
+function isOwner() { return currentUser && currentUser.email === OWNER_EMAIL; }
+
+// ── Auth UI ──────────────────────────────────────────────────────
+function handleAuthClick() {
+  if (currentUser) {
+    auth.signOut();
+  } else {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    auth.signInWithPopup(provider).catch(err => showToast('Login failed: ' + err.message));
+  }
+}
+
+function updateAuthUI(user) {
+  const btn = document.getElementById('authBtn');
+  const lbl = document.getElementById('authBtnLabel');
+  if (!btn) return;
+  if (!user) {
+    btn.className = 'auth-btn';
+    btn.innerHTML = '<span id="authBtnLabel">🔑 Σύνδεση</span>';
+    document.body.classList.add('readonly');
+  } else if (user.email === OWNER_EMAIL) {
+    btn.className = 'auth-btn owner';
+    btn.innerHTML = `${user.photoURL ? `<img src="${user.photoURL}" alt="">` : ''}
+      <span id="authBtnLabel">✓ ${user.displayName||user.email}</span>`;
+    document.body.classList.remove('readonly');
+  } else {
+    btn.className = 'auth-btn';
+    btn.innerHTML = `${user.photoURL ? `<img src="${user.photoURL}" alt="">` : ''}
+      <span id="authBtnLabel">👁 ${user.email} (logout)</span>`;
+    document.body.classList.add('readonly');
+    showToast('Προβολή μόνο — δεν είστε ο ιδιοκτήτης.');
+  }
 }
 
 function showToast(msg) {
   const t = document.getElementById('syncToast');
   t.textContent = msg; t.style.opacity = '1';
-  setTimeout(() => { t.style.opacity = '0'; }, 2500);
+  setTimeout(() => { t.style.opacity = '0'; }, 3000);
 }
 
-function copyUid() {
-  const link = window.location.origin + window.location.pathname + '?uid=' + USER_UID;
-  navigator.clipboard.writeText(link).then(() => showToast('🔗 Sync link copied! Open it on any device.')).catch(() => showToast('Your ID: ' + USER_UID));
-}
-
-// ── Load from localStorage first (instant), then Firestore ──────
+// ── Load from localStorage first (instant) ──────────────────────
 try { shopChecked = JSON.parse(localStorage.getItem('sc_gr')||'{}'); } catch(e){}
 try { mealStatus  = JSON.parse(localStorage.getItem('ms_gr')||'{}'); } catch(e){}
 try { remOnState  = JSON.parse(localStorage.getItem('ro_gr')||'{}'); } catch(e){}
 try { mealSwaps   = JSON.parse(localStorage.getItem('sw_gr')||'{}'); } catch(e){}
 REMINDERS_DATA.forEach(r=>{ if(remOnState[r.time]===undefined) remOnState[r.time]=true; });
+document.body.classList.add('readonly'); // start read-only until auth resolves
 
-// Fetch from Firestore and override if fresher
-setSyncStatus('syncing');
-db.collection('users').doc(USER_UID).get().then(doc => {
-  if (doc.exists) {
-    const d = doc.data();
-    try { if (d.sc_gr) { shopChecked = JSON.parse(d.sc_gr); localStorage.setItem('sc_gr', d.sc_gr); } } catch(e){}
-    try { if (d.ms_gr) { mealStatus  = JSON.parse(d.ms_gr); localStorage.setItem('ms_gr', d.ms_gr); } } catch(e){}
-    try { if (d.ro_gr) { remOnState  = JSON.parse(d.ro_gr); localStorage.setItem('ro_gr', d.ro_gr); } } catch(e){}
-    try { if (d.sw_gr) { mealSwaps   = JSON.parse(d.sw_gr); localStorage.setItem('sw_gr', d.sw_gr); } } catch(e){}
-    REMINDERS_DATA.forEach(r=>{ if(remOnState[r.time]===undefined) remOnState[r.time]=true; });
-    renderMeals(); renderHeader(); renderDaySelector();
-  }
-  setSyncStatus('synced');
-}).catch(() => setSyncStatus('error'));
+// ── Fetch from Firestore on load ─────────────────────────────────
+function loadFromFirestore() {
+  db.collection('users').doc(DATA_DOC).get().then(doc => {
+    if (doc.exists) {
+      const d = doc.data();
+      try { if (d.sc_gr) { shopChecked = JSON.parse(d.sc_gr); localStorage.setItem('sc_gr', d.sc_gr); } } catch(e){}
+      try { if (d.ms_gr) { mealStatus  = JSON.parse(d.ms_gr); localStorage.setItem('ms_gr', d.ms_gr); } } catch(e){}
+      try { if (d.ro_gr) { remOnState  = JSON.parse(d.ro_gr); localStorage.setItem('ro_gr', d.ro_gr); } } catch(e){}
+      try { if (d.sw_gr) { mealSwaps   = JSON.parse(d.sw_gr); localStorage.setItem('sw_gr', d.sw_gr); } } catch(e){}
+      REMINDERS_DATA.forEach(r=>{ if(remOnState[r.time]===undefined) remOnState[r.time]=true; });
+      renderMeals(); renderDaySelector();
+    }
+  }).catch(() => {});
+}
+loadFromFirestore();
 
-// ── Debounced save ───────────────────────────────────────────────
+// ── Auth state observer ──────────────────────────────────────────
+auth.onAuthStateChanged(user => {
+  currentUser = user;
+  updateAuthUI(user);
+  if (user) loadFromFirestore(); // re-load fresh data on login
+});
+
+// ── Debounced save (owner only) ──────────────────────────────────
 let _saveTimer = null;
 function save() {
-  // Write to localStorage immediately
+  // Always write to localStorage
   try {
     localStorage.setItem('sc_gr', JSON.stringify(shopChecked));
     localStorage.setItem('ms_gr', JSON.stringify(mealStatus));
     localStorage.setItem('ro_gr', JSON.stringify(remOnState));
     localStorage.setItem('sw_gr', JSON.stringify(mealSwaps));
   } catch(e){}
-  // Debounce Firestore write (max 1 write per 1.5s)
+  // Only write to Firestore if owner is logged in
+  if (!isOwner()) return;
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
-    setSyncStatus('syncing');
-    db.collection('users').doc(USER_UID).set({
+    db.collection('users').doc(DATA_DOC).set({
       sc_gr: JSON.stringify(shopChecked),
       ms_gr: JSON.stringify(mealStatus),
       ro_gr: JSON.stringify(remOnState),
       sw_gr: JSON.stringify(mealSwaps),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }).then(() => setSyncStatus('synced')).catch(() => setSyncStatus('error'));
+    }).then(() => showToast('✓ Αποθηκεύτηκε')).catch(() => showToast('⚠️ Σφάλμα αποθήκευσης'));
   }, 1500);
 }
 
