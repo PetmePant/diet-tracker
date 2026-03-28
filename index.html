@@ -48,8 +48,9 @@
   .sync-dot.error   { background: var(--danger); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #syncToast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1e293b; color:#fff; padding:10px 20px; border-radius:10px; font-size:13px; z-index:9999; opacity:0; transition:opacity .3s; pointer-events:none; }
-  body.readonly .meal-check, body.readonly .swap-btn, body.readonly .shop-check,
-  body.readonly .rem-toggle, body.readonly .clear-meal-btn { opacity:0.4; pointer-events:none; cursor:not-allowed; }
+  body.readonly .tog, body.readonly .tog-clear,
+  body.readonly .shop-item,
+  body.readonly button.toggle { opacity:0.4; pointer-events:none !important; cursor:not-allowed; }
   .readonly-banner { display:none; background:#f0f9ff; border-bottom:1px solid #bae6fd; padding:8px 24px; font-size:12px; color:#0369a1; text-align:center; }
   body.readonly .readonly-banner { display:block; }
 
