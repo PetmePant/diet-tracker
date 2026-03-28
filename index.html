@@ -6,6 +6,8 @@
 <title>Παντελής – Διατροφικό Πρόγραμμα</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root {
     --bg: #f5f6f8;
@@ -35,6 +37,14 @@
   header h1 { font-family: 'DM Serif Display', serif; font-size: 20px; }
   header span { font-size: 12px; color: var(--muted); display: block; }
   .date-badge { margin-left: auto; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 7px 14px; font-size: 12px; color: var(--muted); text-align:right; }
+  .sync-badge { display:flex; align-items:center; gap:6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 6px 12px; font-size: 11px; color: var(--muted); cursor:pointer; transition: border-color .2s; }
+  .sync-badge:hover { border-color: var(--accent); }
+  .sync-dot { width:7px; height:7px; border-radius:50%; background:#94a3b8; flex-shrink:0; }
+  .sync-dot.synced  { background: var(--accent); }
+  .sync-dot.syncing { background: #f59e0b; animation: pulse 1s infinite; }
+  .sync-dot.error   { background: var(--danger); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  #syncToast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1e293b; color:#fff; padding:10px 20px; border-radius:10px; font-size:13px; z-index:9999; opacity:0; transition:opacity .3s; pointer-events:none; }
 
   nav { display: flex; gap: 4px; padding: 14px 24px 0; border-bottom: 1px solid var(--border); overflow-x: auto; background: #ffffff; }
   nav button { background: none; border: none; color: var(--muted); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; padding: 9px 16px; cursor: pointer; border-radius: 10px 10px 0 0; transition: all .2s; white-space: nowrap; }
@@ -205,8 +215,13 @@
     <h1>Παντελής – Διατροφή</h1>
     <span id="headerDate">Φόρτωση...</span>
   </div>
+  <div class="sync-badge" onclick="copyUid()" title="Tap to copy your Sync ID">
+    <div class="sync-dot" id="syncDot"></div>
+    <span id="syncLabel">Sync</span>
+  </div>
   <div class="date-badge" id="headerDay">—</div>
 </header>
+<div id="syncToast"></div>
 
 <nav>
   <button class="active" onclick="switchTab('today')">Σήμερα</button>
@@ -605,19 +620,97 @@ let shopFilter  = 'Όλα';
 let activeChart = 'weight';
 let chartInst   = null;
 
+// ── Firebase setup ──────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBGjiJiz1Hqd-XdJvik_-5v1LH9uCurolk",
+  authDomain: "diet-tracker-38327.firebaseapp.com",
+  projectId: "diet-tracker-38327",
+  storageBucket: "diet-tracker-38327.firebasestorage.app",
+  messagingSenderId: "343365872063",
+  appId: "1:343365872063:web:109094a1799e8c2daf190a"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// ── User ID — from URL param or localStorage ─────────────────────
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const urlUid = params.get('uid');
+  if (urlUid) {
+    localStorage.setItem('diet_uid', urlUid);
+    // Clean URL without reload
+    const clean = window.location.pathname;
+    window.history.replaceState({}, '', clean);
+  }
+  if (!localStorage.getItem('diet_uid')) {
+    localStorage.setItem('diet_uid', 'u_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36));
+  }
+})();
+const USER_UID = localStorage.getItem('diet_uid');
+
+function setSyncStatus(state) {
+  const dot = document.getElementById('syncDot');
+  const lbl = document.getElementById('syncLabel');
+  if (!dot) return;
+  dot.className = 'sync-dot ' + state;
+  lbl.textContent = state === 'synced' ? 'Synced' : state === 'syncing' ? 'Syncing…' : state === 'error' ? 'Offline' : 'Sync';
+}
+
+function showToast(msg) {
+  const t = document.getElementById('syncToast');
+  t.textContent = msg; t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 2500);
+}
+
+function copyUid() {
+  const link = window.location.origin + window.location.pathname + '?uid=' + USER_UID;
+  navigator.clipboard.writeText(link).then(() => showToast('🔗 Sync link copied! Open it on any device.')).catch(() => showToast('Your ID: ' + USER_UID));
+}
+
+// ── Load from localStorage first (instant), then Firestore ──────
 try { shopChecked = JSON.parse(localStorage.getItem('sc_gr')||'{}'); } catch(e){}
 try { mealStatus  = JSON.parse(localStorage.getItem('ms_gr')||'{}'); } catch(e){}
 try { remOnState  = JSON.parse(localStorage.getItem('ro_gr')||'{}'); } catch(e){}
 try { mealSwaps   = JSON.parse(localStorage.getItem('sw_gr')||'{}'); } catch(e){}
 REMINDERS_DATA.forEach(r=>{ if(remOnState[r.time]===undefined) remOnState[r.time]=true; });
 
+// Fetch from Firestore and override if fresher
+setSyncStatus('syncing');
+db.collection('users').doc(USER_UID).get().then(doc => {
+  if (doc.exists) {
+    const d = doc.data();
+    try { if (d.sc_gr) { shopChecked = JSON.parse(d.sc_gr); localStorage.setItem('sc_gr', d.sc_gr); } } catch(e){}
+    try { if (d.ms_gr) { mealStatus  = JSON.parse(d.ms_gr); localStorage.setItem('ms_gr', d.ms_gr); } } catch(e){}
+    try { if (d.ro_gr) { remOnState  = JSON.parse(d.ro_gr); localStorage.setItem('ro_gr', d.ro_gr); } } catch(e){}
+    try { if (d.sw_gr) { mealSwaps   = JSON.parse(d.sw_gr); localStorage.setItem('sw_gr', d.sw_gr); } } catch(e){}
+    REMINDERS_DATA.forEach(r=>{ if(remOnState[r.time]===undefined) remOnState[r.time]=true; });
+    renderMeals(); renderHeader(); renderDaySelector();
+  }
+  setSyncStatus('synced');
+}).catch(() => setSyncStatus('error'));
+
+// ── Debounced save ───────────────────────────────────────────────
+let _saveTimer = null;
 function save() {
+  // Write to localStorage immediately
   try {
     localStorage.setItem('sc_gr', JSON.stringify(shopChecked));
     localStorage.setItem('ms_gr', JSON.stringify(mealStatus));
     localStorage.setItem('ro_gr', JSON.stringify(remOnState));
     localStorage.setItem('sw_gr', JSON.stringify(mealSwaps));
   } catch(e){}
+  // Debounce Firestore write (max 1 write per 1.5s)
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    setSyncStatus('syncing');
+    db.collection('users').doc(USER_UID).set({
+      sc_gr: JSON.stringify(shopChecked),
+      ms_gr: JSON.stringify(mealStatus),
+      ro_gr: JSON.stringify(remOnState),
+      sw_gr: JSON.stringify(mealSwaps),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => setSyncStatus('synced')).catch(() => setSyncStatus('error'));
+  }, 1500);
 }
 
 // Header
